@@ -1,0 +1,284 @@
+--T-- ============================================================
+-- PROYECTO: SISTEMA DE INVENTARIO Y FACTURACION
+-- BASE DE DATOS: inventario_bdii
+-- MOTOR: POSTGRESQL 18
+-- ARCHIVO: 10_procedimientos_funciones_vistas.sql
+--
+-- CONTIENE:
+-- 1. Procedimiento de recepcion de compras.
+-- 2. Procedimiento de registro de pagos.
+-- 3. Vista de inventario critico.
+-- 4. Vista de existencias por categoria.
+-- 5. Vista de ventas por cliente.
+--
+-- UTILIZA LOS TRIGGERS EXISTENTES.
+-- ============================================================
+
+BEGIN;
+
+
+-- ============================================================
+-- 1. PROCEDIMIENTO: CONFIRMAR RECEPCION DE COMPRA
+-- ============================================================
+
+CREATE OR REPLACE PROCEDURE public.confirmar_recepcion_compra(
+    IN p_id_compra INTEGER
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_estado VARCHAR(20);
+BEGIN
+
+    -- Buscar y bloquear la compra
+    SELECT estado
+    INTO v_estado
+    FROM public.compras_encabezado
+    WHERE id_compra = p_id_compra
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'La compra % no existe', p_id_compra;
+    END IF;
+
+    -- Validar estado
+    IF v_estado <> 'PENDIENTE' THEN
+        RAISE EXCEPTION
+            'La compra % no esta pendiente. Estado actual: %',
+            p_id_compra, v_estado;
+    END IF;
+
+    -- Validar que existan detalles
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.detalle_compra
+        WHERE id_compra = p_id_compra
+    ) THEN
+        RAISE EXCEPTION
+            'La compra no contiene productos';
+    END IF;
+
+    -- Confirmar recepcion.
+    -- El trigger trg_procesar_compra_recibida
+    -- se encargara del procesamiento del inventario.
+    UPDATE public.compras_encabezado
+    SET estado = 'RECIBIDA'
+    WHERE id_compra = p_id_compra;
+
+    RAISE NOTICE
+        'Compra % recibida correctamente',
+        p_id_compra;
+
+END;
+$$;
+
+
+-- ============================================================
+-- 2. PROCEDIMIENTO: REGISTRAR PAGO DE FACTURA
+-- ============================================================
+
+CREATE OR REPLACE PROCEDURE public.registrar_pago_factura(
+    IN p_id_factura INTEGER,
+    IN p_id_forma_pago INTEGER,
+    IN p_monto NUMERIC,
+    IN p_referencia VARCHAR DEFAULT NULL
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_estado VARCHAR(20);
+    v_total NUMERIC(12,2);
+    v_pagado NUMERIC(12,2);
+    v_saldo NUMERIC(12,2);
+BEGIN
+
+    -- Buscar y bloquear factura
+    SELECT estado, total
+    INTO v_estado, v_total
+    FROM public.facturas_encabezado
+    WHERE id_factura = p_id_factura
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'La factura % no existe', p_id_factura;
+    END IF;
+
+    -- Validar estado
+    IF v_estado <> 'PENDIENTE' THEN
+        RAISE EXCEPTION
+            'La factura no permite pagos. Estado: %',
+            v_estado;
+    END IF;
+
+    -- Validar monto
+    IF p_monto IS NULL OR p_monto <= 0 THEN
+        RAISE EXCEPTION
+            'El monto debe ser mayor que cero';
+    END IF;
+
+    -- Validar forma de pago
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.formas_pago
+        WHERE id_forma_pago = p_id_forma_pago
+    ) THEN
+        RAISE EXCEPTION
+            'La forma de pago no existe';
+    END IF;
+
+    -- Calcular pagos anteriores
+    SELECT COALESCE(SUM(monto), 0)
+    INTO v_pagado
+    FROM public.pagos
+    WHERE id_factura = p_id_factura
+      AND estado = 'CONFIRMADO';
+
+    v_saldo := v_total - v_pagado;
+
+    -- Validar saldo
+    IF p_monto > v_saldo THEN
+        RAISE EXCEPTION
+            'El pago excede el saldo pendiente: Q%',
+            v_saldo;
+    END IF;
+
+    -- Registrar pago
+    INSERT INTO public.pagos (
+        id_factura,
+        id_forma_pago,
+        fecha_pago,
+        monto,
+        referencia,
+        estado
+    )
+    VALUES (
+        p_id_factura,
+        p_id_forma_pago,
+        CURRENT_DATE,
+        p_monto,
+        p_referencia,
+        'CONFIRMADO'
+    );
+
+    -- Si se completa el pago, cambiar estado.
+    -- El trigger trg_procesar_factura_pagada
+    -- procesara la salida del inventario.
+    IF p_monto = v_saldo THEN
+
+        UPDATE public.facturas_encabezado
+        SET estado = 'PAGADO'
+        WHERE id_factura = p_id_factura;
+
+    END IF;
+
+    RAISE NOTICE
+        'Pago registrado. Saldo pendiente: Q%',
+        v_saldo - p_monto;
+
+END;
+$$;
+
+
+-- ============================================================
+-- 3. VISTA: INVENTARIO CRITICO
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.vw_inventario_critico AS
+SELECT
+    id_producto,
+    nombre_producto,
+    stock_actual,
+    stock_minimo,
+    stock_minimo - stock_actual AS cantidad_faltante
+FROM public.productos
+WHERE stock_actual <= stock_minimo;
+
+
+-- ============================================================
+-- 4. VISTA: EXISTENCIAS POR CATEGORIA
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.vw_stock_productos AS
+SELECT
+    p.id_producto,
+    p.nombre_producto,
+    c.nombre_categoria,
+    p.stock_actual,
+    p.stock_minimo,
+    CASE
+        WHEN p.stock_actual = 0 THEN 'SIN STOCK'
+        WHEN p.stock_actual <= p.stock_minimo THEN 'STOCK BAJO'
+        ELSE 'DISPONIBLE'
+    END AS estado_stock
+FROM public.productos p
+INNER JOIN public.categorias c
+    ON p.id_categoria = c.id_categoria;
+
+
+-- ============================================================
+-- 5. VISTA: RESUMEN DE VENTAS POR CLIENTE
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.vw_ventas_por_cliente AS
+SELECT
+    c.id_cliente,
+    c.nombre_completo,
+    COUNT(f.id_factura) AS cantidad_facturas,
+    COALESCE(SUM(f.total), 0) AS total_comprado
+FROM public.clientes c
+LEFT JOIN public.facturas_encabezado f
+    ON c.id_cliente = f.id_cliente
+   AND f.estado <> 'ANULADO'
+GROUP BY
+    c.id_cliente,
+    c.nombre_completo;
+
+
+COMMIT;
+
+
+-- ============================================================
+-- 6. CONSULTAR PROCEDIMIENTOS CREADOS
+-- ============================================================
+
+SELECT
+    routine_name,
+    routine_type
+FROM information_schema.routines
+WHERE routine_schema = 'public'
+  AND routine_type = 'PROCEDURE'
+ORDER BY routine_name;
+
+
+-- ============================================================
+-- 7. CONSULTAR VISTAS CREADAS
+-- ============================================================
+
+SELECT
+    table_name AS nombre_vista
+FROM information_schema.views
+WHERE table_schema = 'public'
+  AND table_name IN (
+      'vw_inventario_critico',
+      'vw_stock_productos',
+      'vw_ventas_por_cliente'
+  )
+ORDER BY table_name;
+
+
+-- ============================================================
+-- 8. CONSULTAR RESULTADOS DE LAS VISTAS
+-- ============================================================
+
+SELECT * FROM public.vw_inventario_critico;
+
+SELECT * FROM public.vw_stock_productos;
+
+SELECT * FROM public.vw_ventas_por_cliente;
+
+
+-- ============================================================
+-- FIN DEL SCRIPT
+-- ============================================================
