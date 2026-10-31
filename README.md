@@ -37,24 +37,21 @@ inventario-facturacion-bd/
 ├── README.md
 ├── .gitignore
 │
-├── docs/
-│   ├── 01_descripcion_sistema.md
-│   ├── 02_diccionario_datos.md
-│   ├── 03_justificacion_relaciones.md
-│   ├── 04_normalizacion.md
-│   └── 05_paso_a_paso.md
 │
-├── diagramas/
-│   ├── modelo_er.png
-│   ├── modelo_relacional.png
-│   └── modelo_er.drawio
+├── 01_descripcion_sistema.md
+├── 02_diccionario_datos.md
+├── 03_justificacion_relaciones.md
+├── 04_normalizacion.md
+├── 05_paso_a_paso.md
 │
-└── sql/
-    ├── 01_ddl_crear_base_datos.sql
-    ├── 02_ddl_crear_tablas.sql
-    ├── 03_dml_datos_prueba.sql
-    ├── 04_consultas_reportes.sql
-    └── 05_extras_opcional.sql
+│
+├── Diagrama_BD.png
+│
+├── 01_ddl_crear_base_datos.sql
+├── 02_ddl_crear_tablas.sql
+├── 03_dml_datos_prueba.sql
+├── 04_consultas_reportes.sql
+├── 05_extras_opcional.sql
 ```
 
 ## 5. Modelo entidad-relación
